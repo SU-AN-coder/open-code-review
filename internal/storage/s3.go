@@ -69,31 +69,33 @@ func newS3BackendWithClient(cfg S3Config, client *http.Client) (*s3Backend, erro
 
 func (b *s3Backend) Name() string { return TypeS3 }
 
-// objectPath returns the unescaped and escaped request path for a key.
+// objectPath returns the unescaped and escaped request path for a key. An empty
+// key addresses the bucket itself, which is how a listing request is built: the
+// bucket path carries no trailing slash, so a bucket-level GET is
+// /<bucket>?list-type=2 rather than /<bucket>//?list-type=2.
 func (b *s3Backend) objectPath(key string) (path, escaped string) {
-	var unescaped strings.Builder
-	var encoded strings.Builder
+	base := ""
 	if b.cfg.PathStyle {
-		unescaped.WriteString("/" + b.cfg.Bucket)
-		encoded.WriteString("/" + b.cfg.Bucket)
+		base = "/" + b.cfg.Bucket
 	}
-	unescaped.WriteString("/" + key)
-	encoded.WriteString("/")
-	segments := strings.Split(key, "/")
-	for i, segment := range segments {
-		if i > 0 {
-			encoded.WriteString("/")
+	trimmed := strings.Trim(key, "/")
+	if trimmed == "" {
+		if base == "" {
+			return "/", "/"
 		}
-		encoded.WriteString(awsEscape(segment))
+		return base, base
 	}
-	return unescaped.String(), encoded.String()
+	segments := strings.Split(trimmed, "/")
+	encoded := make([]string, 0, len(segments))
+	for _, segment := range segments {
+		encoded = append(encoded, awsEscape(segment))
+	}
+	return base + "/" + trimmed, base + "/" + strings.Join(encoded, "/")
 }
 
-// request builds a signed request for key. A nil body sends no payload.
+// request builds a signed request for key. An empty key addresses the bucket
+// itself; a nil body sends no payload.
 func (b *s3Backend) request(ctx context.Context, method, key string, query url.Values, body []byte) (*http.Request, error) {
-	if key == "" {
-		return nil, fmt.Errorf("storage: empty object key")
-	}
 	path, escaped := b.objectPath(key)
 	u := &url.URL{
 		Scheme:   b.scheme,
@@ -122,7 +124,19 @@ func (b *s3Backend) request(ctx context.Context, method, key string, query url.V
 	return req, nil
 }
 
+// requireKey rejects a key that would address the bucket itself, for the verbs
+// that only make sense on an object.
+func requireKey(key string) error {
+	if strings.Trim(key, "/") == "" {
+		return fmt.Errorf("storage: empty object key")
+	}
+	return nil
+}
+
 func (b *s3Backend) Put(ctx context.Context, key string, data []byte) error {
+	if err := requireKey(key); err != nil {
+		return err
+	}
 	req, err := b.request(ctx, http.MethodPut, key, nil, data)
 	if err != nil {
 		return err
@@ -131,6 +145,9 @@ func (b *s3Backend) Put(ctx context.Context, key string, data []byte) error {
 }
 
 func (b *s3Backend) Get(ctx context.Context, key string) ([]byte, error) {
+	if err := requireKey(key); err != nil {
+		return nil, err
+	}
 	req, err := b.request(ctx, http.MethodGet, key, nil, nil)
 	if err != nil {
 		return nil, err
@@ -154,6 +171,9 @@ func (b *s3Backend) Get(ctx context.Context, key string) ([]byte, error) {
 }
 
 func (b *s3Backend) Delete(ctx context.Context, key string) error {
+	if err := requireKey(key); err != nil {
+		return err
+	}
 	req, err := b.request(ctx, http.MethodDelete, key, nil, nil)
 	if err != nil {
 		return err
@@ -186,7 +206,7 @@ func (b *s3Backend) List(ctx context.Context, prefix string) ([]string, error) {
 		}
 		// The list request addresses the bucket itself, so the key is empty and
 		// only the query carries the selector.
-		req, err := b.request(ctx, http.MethodGet, "/", query, nil)
+		req, err := b.request(ctx, http.MethodGet, "", query, nil)
 		if err != nil {
 			return nil, err
 		}

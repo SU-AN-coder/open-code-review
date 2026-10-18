@@ -33,6 +33,8 @@ type fakeS3Server struct {
 	pageSize int
 	// requests records the method and key of every request received.
 	requests []string
+	// paths records the request path of every request received.
+	paths []string
 }
 
 func newFakeS3Server(t *testing.T) *fakeS3Server {
@@ -60,6 +62,7 @@ func (f *fakeS3Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	key := strings.TrimPrefix(r.URL.Path, "/test-bucket/")
 	f.requests = append(f.requests, r.Method+" "+key)
+	f.paths = append(f.paths, r.URL.Path)
 
 	switch r.Method {
 	case http.MethodPut:
@@ -201,6 +204,53 @@ func TestS3RoundTrip(t *testing.T) {
 	// Deleting an absent object is not an error: a retried delete must succeed.
 	if err := backend.Delete(ctx, "sessions/repo/id-1.jsonl"); err != nil {
 		t.Errorf("second Delete: %v", err)
+	}
+}
+
+func TestS3RequestPaths(t *testing.T) {
+	// The path of each verb is part of the SigV4 canonical request, so a wrong
+	// one is a wrong signature: a bucket-level listing must address the bucket
+	// itself, without an extra slash that would read as an object named "/".
+	backend, fake := newTestBackend(t, nil)
+	ctx := context.Background()
+
+	if err := backend.Put(ctx, "sessions/repo/id.jsonl", []byte("x")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := backend.List(ctx, "sessions/"); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	paths := append([]string(nil), fake.paths...)
+	if len(paths) != 2 {
+		t.Fatalf("server saw %d requests, want 2: %v", len(paths), paths)
+	}
+	if paths[0] != "/test-bucket/sessions/repo/id.jsonl" {
+		t.Errorf("object request path = %q", paths[0])
+	}
+	if paths[1] != "/test-bucket" {
+		t.Errorf("bucket listing path = %q, want /test-bucket with no trailing slash", paths[1])
+	}
+	for _, path := range paths {
+		if strings.Contains(path, "//") {
+			t.Errorf("request path %q contains a doubled slash", path)
+		}
+	}
+}
+
+func TestS3ObjectVerbsRejectEmptyKey(t *testing.T) {
+	backend, _ := newTestBackend(t, nil)
+	ctx := context.Background()
+	for name, call := range map[string]func() error{
+		"Put":    func() error { return backend.Put(ctx, "/", []byte("x")) },
+		"Get":    func() error { _, err := backend.Get(ctx, ""); return err },
+		"Delete": func() error { return backend.Delete(ctx, "") },
+	} {
+		if err := call(); err == nil {
+			t.Errorf("%s accepted an empty key", name)
+		}
 	}
 }
 
