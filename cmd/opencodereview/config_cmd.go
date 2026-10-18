@@ -669,7 +669,9 @@ func setConfigValue(cfg *Config, key, value string) error {
 	if strings.HasPrefix(key, "mcp_servers.") {
 		return setMCPServerValue(cfg, key, value)
 	}
-	if strings.HasPrefix(key, "storage.s3.") {
+	// The s3 block answers to both the documented "storage.s3.<field>" and the
+	// Go-field "storage.S3.<field>" spelling; setStorageS3Value unwraps either.
+	if strings.HasPrefix(strings.ToLower(key), "storage.s3.") {
 		return setStorageS3Value(cfg, key, value)
 	}
 
@@ -1097,8 +1099,12 @@ func (c *Config) ensureStorage() *storage.FileConfig {
 
 // setStorageS3Value writes one field of the storage.s3 block.
 func setStorageS3Value(cfg *Config, key, value string) error {
-	field := strings.TrimPrefix(key, "storage.s3.")
-	field = strings.TrimPrefix(field, "S3.")
+	// setConfigValue routes both spellings here, so strip the prefix without
+	// assuming its case.
+	field := key
+	if lower := strings.ToLower(field); strings.HasPrefix(lower, "storage.s3.") {
+		field = field[len("storage.s3."):]
+	}
 	section := cfg.ensureStorage()
 	trimmed := strings.TrimSpace(value)
 

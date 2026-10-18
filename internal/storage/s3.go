@@ -37,6 +37,12 @@ const s3RequestTimeout = 5 * time.Minute
 // cannot spin the caller forever.
 const maxListPages = 1000
 
+// maxObjectBytes bounds one object read. Session files are JSONL transcripts and
+// stay far below this; the cap exists so a misconfigured or hostile
+// S3-compatible endpoint cannot make the process allocate without limit when a
+// GET is answered with an arbitrarily large body.
+const maxObjectBytes = 64 << 20
+
 func newS3Backend(cfg S3Config) (*s3Backend, error) {
 	return newS3BackendWithClient(cfg, &http.Client{Timeout: s3RequestTimeout})
 }
@@ -163,9 +169,19 @@ func (b *s3Backend) Get(ctx context.Context, key string) ([]byte, error) {
 	if err := statusError("get", key, resp); err != nil {
 		return nil, err
 	}
-	data, err := io.ReadAll(resp.Body)
+	return readBounded(resp.Body, key, maxObjectBytes)
+}
+
+// readBounded reads one object, refusing a source that carries more than limit
+// bytes. The read is capped one byte past the limit, so a source exactly at the
+// limit is still accepted while a larger one is reported instead of buffered.
+func readBounded(r io.Reader, key string, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, limit+1))
 	if err != nil {
 		return nil, fmt.Errorf("storage: read %q: %w", key, err)
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("storage: get %q: object exceeds %d bytes", key, limit)
 	}
 	return data, nil
 }
@@ -214,13 +230,16 @@ func (b *s3Backend) List(ctx context.Context, prefix string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("storage: list %q: %w", prefix, err)
 		}
-		var result listBucketResult
-		decodeErr := xml.NewDecoder(resp.Body).Decode(&result)
-		statusErr := statusError("list", prefix, resp)
-		resp.Body.Close()
-		if statusErr != nil {
+		// Check the status before decoding. statusError quotes up to 512 bytes of
+		// the body, and an XML decoder that already drained it would leave the
+		// error without the detail the server sent.
+		if statusErr := statusError("list", prefix, resp); statusErr != nil {
+			resp.Body.Close()
 			return nil, statusErr
 		}
+		var result listBucketResult
+		decodeErr := xml.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
 		if decodeErr != nil {
 			return nil, fmt.Errorf("storage: decode list response for %q: %w", prefix, decodeErr)
 		}

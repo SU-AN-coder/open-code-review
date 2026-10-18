@@ -364,7 +364,14 @@ func (sh *SessionHistory) Finalize() error {
 			// file, so the mirror now receives the complete session. A failed
 			// upload does not fail the run: the local cache still holds the
 			// session, and the warning names what did not reach the store.
-			sh.mirrorSession()
+			if sh.finalizeErr == nil {
+				sh.mirrorSession()
+			} else {
+				// The local file may be truncated mid-record, and the store is
+				// the copy the other machines read from. Uploading a half
+				// written session spreads the damage instead of containing it.
+				warnStorage("session %s: not uploaded, the local session file was not finalised: %v", sh.SessionID, sh.finalizeErr)
+			}
 		}
 	})
 	return sh.finalizeErr
