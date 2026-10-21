@@ -1,5 +1,5 @@
 #### CUDA and HIP Kernel Review Principles
-> Favor precision over recall: report only issues that produce wrong results, read or write memory out of bounds, hide a failed launch, or hang the device — anything else is noise in a review of GPU code. CUDA and HIP are one programming model with two spellings of the same API, so judge each finding against the header the file actually includes (`cuda*` versus `hip*`) rather than translating one into the other, and read the target architecture before applying anything version-specific: the `_sync` shuffle and ballot intrinsics arrived in CUDA 9, `atomicAdd(double*)` needs sm_60, and device-side recursion needs relocatable device code with sm_35 or later. Do not report naming, `<<<...>>>` spacing, or host/device code layout preferences.
+> Favor precision over recall: report only issues that produce wrong results, read or write memory out of bounds, hide a failed launch, or hang the device — anything else is noise in a review of GPU code. CUDA and HIP are one programming model with two spellings of the same API, so judge each finding against the header the file actually includes (`cuda*` versus `hip*`) rather than translating one into the other, and read the target architecture before applying anything version-specific: the `_sync` shuffle and ballot intrinsics arrived in CUDA 9, `atomicAdd()` on `double` is not available on devices with compute capability lower than 6.0, and a device-side launch — a `__global__` call from device code, or recursion in device code — is only supported by devices of compute capability 3.5 and higher and needs relocatable device code (`-rdc=true`, linked against the CUDA device runtime). Do not report naming, `<<<...>>>` spacing, or host/device code layout preferences.
 
 #### Launch Configuration and Error Checking
 - A grid or block dimension that can evaluate to zero (an empty batch, `ceil_div(0, n)`, a `min` clamp), which fails the launch and invalidates every later operation on that stream
@@ -23,7 +23,6 @@
 - A flag or spin variable written by one thread and read by another without `volatile`, `__threadfence()`, or an atomic, so the compiler may keep it in a register and the reader never observes the write
 - A non-atomic read-modify-write (`x++`, `x += y`) on a location two threads can touch: histogram bins, counters, and accumulators in a strided loop are the usual cases
 - `atomicAdd` on `float` where the resulting accumulation order changes the answer beyond the caller's tolerance, or on `double` in code also built for pre-sm_60 targets
-- Elements accessed through a reinterpreted pointer whose alignment was not established, on an architecture where a misaligned access faults instead of degrading
 
 #### Bounds, Shapes, and Type Sizes
 - A thread index derived from `blockIdx`, `blockDim` and `threadIdx` used to index an array with no range check covering the partial block of the last iteration
@@ -46,3 +45,12 @@
 - `__restrict__` on a parameter that does alias another parameter of the same kernel, which licenses the compiler to reorder the overlapping loads and stores
 - Device-only code guarded by a host-side macro, or an assumption that `__CUDA_ARCH__` holds the same value in the host and device passes
 - Do not report the presence or absence of `__launch_bounds__`; it is a register-pressure choice
+
+#### Sources
+Every architecture and version claim above is taken from NVIDIA's own documentation; the behavioural rules follow the same sections.
+- Compute capability, thread and block limits, and the required launch configuration: *CUDA C++ Programming Guide*, Thread Hierarchy and Launch Configuration sections.
+- `__syncthreads*()` uniformity, `__activemask()`, `__syncwarp()`, the warp vote and shuffle intrinsics, `__threadfence()` and `__restrict__`: *CUDA C++ Programming Guide*, C/C++ Language Extensions.
+- Code generated for a device-side launch, and its `-rdc=true` / device-runtime requirement: *CUDA C++ Programming Guide*, CUDA Dynamic Parallelism.
+- `cudaGetLastError()` resetting the error variable, and the launch/configuration errors: *CUDA Runtime API*, Error Handling; *CUDA C++ Programming Guide*, Error Checking.
+- `--use_fast_math` implying `--ftz=true --prec-div=false --prec-sqrt=false --fmad=true`: *CUDA Compiler Driver NVCC*, `--use_fast_math`.
+- Page-locked host memory being required to overlap a transfer with kernel execution: *CUDA C++ Programming Guide*, Page-Locked Host Memory and Asynchronous Concurrent Execution.
